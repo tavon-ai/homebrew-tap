@@ -37,12 +37,14 @@ jobs:
 
           version="${TAG#v}"
           class_name=$(echo "$FORMULA" | awk -F '[-_]' '{for (i = 1; i <= NF; i++) printf toupper(substr($i,1,1)) substr($i,2); printf "\n"}')
-          checksums_file=$(mktemp)
+          workdir=$(mktemp -d)
+          checksums_file="$workdir/checksums.txt"
 
           gh release download "$TAG" \
             --repo "$REPOSITORY" \
             --pattern checksums.txt \
-            --output "$checksums_file"
+            --dir "$workdir" \
+            --clobber
 
           sha_for() {
             local artifact="$1"
