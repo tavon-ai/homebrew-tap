@@ -1,0 +1,118 @@
+name: update-formula
+
+on:
+  workflow_dispatch:
+    inputs:
+      formula:
+        description: Formula name
+        required: true
+        type: string
+      tag:
+        description: Release tag like v0.1.0
+        required: true
+        type: string
+      repository:
+        description: Source repository like tavon-ai/lexcli
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate formula
+        env:
+          FORMULA: ${{ inputs.formula }}
+          TAG: ${{ inputs.tag }}
+          REPOSITORY: ${{ inputs.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          version="${TAG#v}"
+          class_name=$(echo "$FORMULA" | awk -F '[-_]' '{for (i = 1; i <= NF; i++) printf toupper(substr($i,1,1)) substr($i,2); printf "\n"}')
+          checksums_file=$(mktemp)
+
+          gh release download "$TAG" \
+            --repo "$REPOSITORY" \
+            --pattern checksums.txt \
+            --output "$checksums_file"
+
+          sha_for() {
+            local artifact="$1"
+            awk -v name="$artifact" '$2 == name {print $1}' "$checksums_file"
+          }
+
+          darwin_amd64_archive="${FORMULA}_${version}_darwin_amd64.tar.gz"
+          darwin_arm64_archive="${FORMULA}_${version}_darwin_arm64.tar.gz"
+          linux_amd64_archive="${FORMULA}_${version}_linux_amd64.tar.gz"
+          linux_arm64_archive="${FORMULA}_${version}_linux_arm64.tar.gz"
+
+          darwin_amd64_sha=$(sha_for "$darwin_amd64_archive")
+          darwin_arm64_sha=$(sha_for "$darwin_arm64_archive")
+          linux_amd64_sha=$(sha_for "$linux_amd64_archive")
+          linux_arm64_sha=$(sha_for "$linux_arm64_archive")
+
+          for value in "$darwin_amd64_sha" "$darwin_arm64_sha" "$linux_amd64_sha" "$linux_arm64_sha"; do
+            if [ -z "$value" ]; then
+              echo "missing checksum in checksums.txt"
+              cat "$checksums_file"
+              exit 1
+            fi
+          done
+
+          mkdir -p Formula
+          cat > "Formula/${FORMULA}.rb" <<EOF
+          class ${class_name} < Formula
+            desc "Unofficial CLI for the Lexware Public API"
+            homepage "https://github.com/${REPOSITORY}"
+            version "${version}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPOSITORY}/releases/download/${TAG}/${darwin_arm64_archive}"
+                sha256 "${darwin_arm64_sha}"
+              else
+                url "https://github.com/${REPOSITORY}/releases/download/${TAG}/${darwin_amd64_archive}"
+                sha256 "${darwin_amd64_sha}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPOSITORY}/releases/download/${TAG}/${linux_arm64_archive}"
+                sha256 "${linux_arm64_sha}"
+              else
+                url "https://github.com/${REPOSITORY}/releases/download/${TAG}/${linux_amd64_archive}"
+                sha256 "${linux_amd64_sha}"
+              end
+            end
+
+            def install
+              bin.install "lex"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/lex --version")
+            end
+          end
+          EOF
+
+      - name: Commit formula update
+        run: |
+          set -euo pipefail
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add Formula
+          if git diff --cached --quiet; then
+            echo "No formula changes"
+            exit 0
+          fi
+          git commit -m "Update lexcli formula"
+          git push
